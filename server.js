@@ -30,6 +30,7 @@ app.get('/weather', getWeather); //daily weather details from location
 app.get('/events', getEvents); // Events by location
 app.get('/movies', getMovies); // Movies related to location
 app.get('/yelp', getYelps); // Businesses near location
+app.get('/trails', getTrails); // Hiking trails near location
 
 // 404 - catch all paths that are not defined
 // ---------------------------------------------
@@ -44,7 +45,7 @@ app.listen(PORT, () => {
 });
 
 
-// SQL insert queries
+// SQL insert into DB queries
 const SQL_INSERTS = {
   locations: `INSERT INTO locations(
     created_at,
@@ -90,7 +91,22 @@ const SQL_INSERTS = {
     rating, 
     url, 
     location_id
-  ) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`
+  ) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+
+  trails: `INSERT INTO trails(
+    created_at,
+    name,
+    location,
+    length,
+    stars,
+    star_votes,
+    summary,
+    trail_url,
+    conditions,
+    condition_date,
+    condition_time,
+    location_id
+  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`
 };
 
 // Location - constructor
@@ -123,34 +139,55 @@ function Event(result) {
 
 // Movies - constructor
 // ***************************
-function Movie(movie) {
+function Movie(result) {
   this.tableName = 'movies';
   this.created_at = Date.now();
-  this.title = movie.title;
-  this.overview = movie.overview;
-  this.average_votes = movie.vote_average;
-  this.total_votes = movie.vote_count;
-  this.image_url = `https://image.tmdb.org/t/p/w500/${movie.poster_path}`;
-  this.popularity = movie.popularity;
-  this.released_on = movie.release_date;
+  this.title = result.title;
+  this.overview = result.overview;
+  this.average_votes = result.vote_average;
+  this.total_votes = result.vote_count;
+  this.image_url = `https://image.tmdb.org/t/p/w500/${result.poster_path}`;
+  this.popularity = result.popularity;
+  this.released_on = result.release_date;
 }
 
 // Yelp - constructor
 // ***************************
-function Yelp(yelp) {
+function Yelp(result) {
   this.created_at = Date.now();
-  this.name = yelp.name;
-  this.image_url = yelp.image_url;
-  this.price = yelp.price;
-  this.rating = yelp.rating;
-  this.url = yelp.url;
+  this.name = result.name;
+  this.image_url = result.image_url;
+  this.price = result.price;
+  this.rating = result.rating;
+  this.url = result.url;
+}
+
+// Trails - constructor
+// **************************
+function Trail(result) {
+  this.created_at = Date.now();
+  this.name = result.name;
+  this.location = result.location;
+  this.length = result.length;
+  this.stars = result.stars;
+  this.star_votes = result.star_votes;
+  this.summary = result.summary;
+  this.trail_url = result.trail_url;
+  this.conditions = result.conditions;
+  this.condition_date = result.condition_date;
+  this.condition_time = result.condition_time;
+}
+
+// HTTP Error handler
+// --------------------
+function handleErrors(err, response) {
+  console.error(err);
+  response.status(500).send('Sorry, something went wrong.');
 }
 
 // Check if API data is old, if true request new data from API
 // ----------------------------------------------------------------
 function checkCachedData(url, result, tableName, period, locationId, response) {
-  console.log('AGE: ', Date.now() - result.rows[0].created_at);
-
   if (Date.now() - result.rows[0].created_at > period) {
     const SQL = `DELETE FROM ${tableName} WHERE location_id=${result.rows[0].location_id}`;
 
@@ -164,7 +201,7 @@ function checkCachedData(url, result, tableName, period, locationId, response) {
   }
 }
 
-// Look up data from the DB
+// Look up data in the DB
 // ---------------------------
 function lookupDB(url, tableName, locationId, response) {
   return client.query(`SELECT * FROM ${tableName} WHERE location_id = $1`, [locationId])
@@ -188,8 +225,8 @@ function cacheUpdate(url, tableName, locationId, response) {
   console.log('Request new data from API');
   let superagentRequest = superagent.get(url);
 
+  // Yelp API needs api key in the headers
   if (tableName === 'yelps') {
-    console.log('yelps');
     superagentRequest = superagent.get(url).set('Authorization', `Bearer ${process.env.YELP_API_KEY}`);
   }
 
@@ -207,8 +244,7 @@ function cacheUpdate(url, tableName, locationId, response) {
         });
     })
     .catch(err => {
-      console.error(err);
-      response.status(500).send('Sorry, something went wrong.');
+      handleErrors(err);
     });
 }
 
@@ -222,7 +258,7 @@ function cacheSend(url, sqlResult, tableName, locationId, response) {
     return checkCachedData(url, sqlResult, 'weathers', 15000, locationId, response);
   } else {
     return response.status(200).send(sqlResult.rows);
-  }  
+  } 
 }
 
 
@@ -248,14 +284,17 @@ function handleInsertDB(result, tableName, locationId) {
     api = handleMoviesInsertDB(result, locationId);
 
     break;
+  case 'trails':
+    api = handleTrailsInsertDB(result, locationId);
+
+    break;
+
   default:
     console.log('No insert query was selected!');
   }
 
   return api;
 }
-
-
 
 // Update weather API data in the DB
 // -----------------------------------------
@@ -329,6 +368,24 @@ function handleYelpsInsertDB(result, locationId) {
   return promises;
 }
 
+// Update Yelp API data in the DB
+// -----------------------------------
+function handleTrailsInsertDB(result, locationId) {
+  let promises = result.body.trails.map(obj => {
+    const trail = new Trail(obj);
+
+    return client.query(SQL_INSERTS.trails, [trail.created_at, trail.name, trail.location, trail.length, trail.stars, trail.star_votes, trail.summary, trail.trail_url, trail.conditions, trail.condition_date, trail.condition_time, locationId])
+      .then(result => {
+        return result.rows[0];
+      })
+      .catch(err => {
+        console.error(err);
+      });
+  });
+
+  return promises;
+}
+
 // Request location data from the Google Geo API
 // --------------------------------------------------
 function getLocation(request, response) {
@@ -354,16 +411,14 @@ function getLocation(request, response) {
               });
           })
           .catch(err => {
-            console.error(err);
-            response.status(500).send('Sorry, something went wrong.');
+            handleErrors(err);
           });
       } else {
         response.send(sqlResult.rows[0]);
       }
     })
     .catch(err => {
-      console.error(err);
-      response.status(500).send('Sorry, something went wrong.');
+      handleErrors(err);
     });
 }
 
@@ -407,4 +462,15 @@ function getYelps(request, response) {
   const url = `https://api.yelp.com/v3/businesses/search?location=${searchQuery}`;
 
   lookupDB(url, 'yelps', locationId, response);
+}
+
+// Request Trail API data
+// -------------------------------
+function getTrails(request, response) {
+  const locationId = parseInt(request.query.data.id);
+  const lat = request.query.data.latitude;
+  const lng = request.query.data.longitude;
+  const url = `https://www.hikingproject.com/data/get-trails?lat=${lat}&lon=${lng}&key=${process.env.TRAIL_API_KEY}`;
+
+  lookupDB(url, 'trails', locationId, response);
 }
